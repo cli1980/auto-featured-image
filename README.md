@@ -16,7 +16,7 @@ The repository root is the plugin directory; no build step is required.
 
 1. Copy this repository's plugin files into
    `wp-content/plugins/featured-image-by-tag/`. Include
-   `featured-image-by-tag.php`, `includes/`, `assets/`, and `fonts/`.
+   `featured-image-by-tag.php`, `includes/`, `assets/`, `fonts/`, and `LICENSE`.
 2. Activate **Featured Image by Tag** in the WordPress Plugins screen.
 3. Open **Settings > Featured Image by Tag** to configure tag backgrounds,
    the canvas, text fields, and fonts.
@@ -61,5 +61,10 @@ and removal of a generated image when the per-post option is disabled.
 
 ## License
 
-The plugin header declares `GPL-2.0-or-later`. Bundled fonts retain their
-respective licenses.
+Copyright (c) 2026 Crossborder Art & Media LLC.
+
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE), matching
+the Manuscript Studio application. Any commercial use requires a separate
+written license negotiated with Crossborder Art & Media LLC.
+
+Bundled fonts retain their respective licenses.

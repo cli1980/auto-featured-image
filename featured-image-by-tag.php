@@ -4,7 +4,9 @@
  * Description: Generates a post's featured image by overlaying its title, category, tags, date and author on a tag-specific background image (or a solid color).
  * Version: 0.1.0
  * Requires PHP: 7.4
- * License: GPL-2.0-or-later
+ * License: PolyForm-Noncommercial-1.0.0
+ * License URI: https://polyformproject.org/licenses/noncommercial/1.0.0/
+ * Required Notice: Copyright (c) 2026 Crossborder Art & Media LLC
  * Text Domain: featured-image-by-tag
  * Update URI: false
  */
