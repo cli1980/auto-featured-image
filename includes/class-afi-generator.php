@@ -2,8 +2,9 @@
 defined( 'ABSPATH' ) || exit;
 
 class AFI_Generator {
-	const META_GENERATED = '_afi_generated';
-	const META_HASH      = '_afi_hash';
+	const META_GENERATED  = '_afi_generated';
+	const META_HASH       = '_afi_hash';
+	const META_BACKGROUND = '_afi_background_id';
 
 	public static function init() {
 		// Fires after terms/meta are saved for both the classic editor and the block editor (REST).
@@ -50,8 +51,11 @@ class AFI_Generator {
 		if ( ! current_user_can( 'upload_files' ) || ! current_user_can( 'edit_post', $post_id ) ) {
 			wp_die( esc_html__( 'Not allowed.', 'featured-image-by-tag' ) );
 		}
-		self::generate( $post_id, true );
-		wp_safe_redirect( wp_get_referer() ?: admin_url( 'edit.php' ) );
+		$result = self::generate( $post_id, true );
+		if ( is_wp_error( $result ) ) {
+			wp_die( esc_html( $result->get_error_message() ), '', array( 'back_link' => true ) );
+		}
+		wp_safe_redirect( add_query_arg( 'afi_generated_post', $post_id, wp_get_referer() ?: admin_url( 'edit.php' ) ) );
 		exit;
 	}
 
@@ -77,6 +81,18 @@ class AFI_Generator {
 	}
 
 	public static function bulk_notice() {
+		$post_id = absint( $_GET['afi_generated_post'] ?? 0 );
+		if ( $post_id && 'edit-post' === get_current_screen()->id && current_user_can( 'edit_post', $post_id ) ) {
+			$att_id = get_post_thumbnail_id( $post_id );
+			if ( $att_id && get_post_meta( $att_id, self::META_GENERATED, true ) ) {
+				$bg_id = (int) get_post_meta( $att_id, self::META_BACKGROUND, true );
+				$message = $bg_id
+					? sprintf( 'Featured image generated using background "%s".', get_the_title( $bg_id ) )
+					: 'Featured image generated using the solid background color. No saved tag-background mapping matched this post. Check the post tags and save their background mappings in Settings > Featured Image by Tag.';
+				$url = add_query_arg( 'afi_preview', time(), wp_get_attachment_url( $att_id ) );
+				printf( '<div class="notice notice-success is-dismissible"><p>%s <a href="%s" target="_blank" rel="noopener noreferrer">%s</a></p></div>', esc_html( $message ), esc_url( $url ), esc_html__( 'View regenerated image', 'featured-image-by-tag' ) );
+			}
+		}
 		if ( isset( $_GET['afi_generated'] ) && 'edit-post' === get_current_screen()->id ) {
 			$n = absint( $_GET['afi_generated'] );
 			printf( '<div class="notice notice-success is-dismissible"><p>%s</p></div>', esc_html( sprintf( _n( 'Generated %d featured image.', 'Generated %d featured images.', $n, 'featured-image-by-tag' ), $n ) ) );
@@ -110,9 +126,13 @@ class AFI_Generator {
 		);
 	}
 
-	/** First tag-mapping row (settings order) that matches one of the post's tags. */
+	/** First configured mapping that matches one of the post's tag IDs. */
 	public static function background_id( $post_id, $o ) {
 		$post_tags = wp_get_post_tags( $post_id, array( 'fields' => 'ids' ) );
+		if ( is_wp_error( $post_tags ) ) {
+			return $post_tags;
+		}
+		$post_tags = array_map( 'intval', $post_tags );
 		foreach ( $o['tag_backgrounds'] as $tag_id => $img_id ) {
 			if ( in_array( (int) $tag_id, $post_tags, true ) ) {
 				return (int) $img_id;
@@ -130,50 +150,186 @@ class AFI_Generator {
 			return new WP_Error( 'afi_no_gd', 'PHP GD with FreeType is required' );
 		}
 		$o     = AFI_Settings::get();
-		$texts = self::texts( $post );
 		$bg_id = self::background_id( $post_id, $o );
+		if ( is_wp_error( $bg_id ) ) {
+			return $bg_id;
+		}
+		$texts = self::texts( $post );
 		$hash  = md5( wp_json_encode( array( $o, $texts, $bg_id ) ) );
 		$old   = get_post_thumbnail_id( $post_id );
-		if ( ! $force && $old && get_post_meta( $old, self::META_GENERATED, true ) && get_post_meta( $post_id, self::META_HASH, true ) === $hash ) {
+		// Only overwrite this post's generated JPEG, never an uploaded image or
+		// an attachment being used as a tag background.
+		$reuse = $old && get_post_meta( $old, self::META_GENERATED, true )
+			&& (int) wp_get_post_parent_id( $old ) === (int) $post_id
+			&& 'image/jpeg' === get_post_mime_type( $old )
+			&& ! in_array( (int) $old, array_map( 'intval', $o['tag_backgrounds'] ), true );
+		if ( ! $force && $reuse && is_file( get_attached_file( $old ) ) && get_post_meta( $post_id, self::META_HASH, true ) === $hash ) {
 			return $old;
 		}
 
 		$img = self::render( $o, $texts, $bg_id );
+		if ( is_wp_error( $img ) ) {
+			return $img;
+		}
 		ob_start();
-		imagejpeg( $img, null, 90 );
+		$encoded = imagejpeg( $img, null, 90 );
 		$data = ob_get_clean();
 		imagedestroy( $img );
-
-		$upload = wp_upload_bits( 'featured-' . ( $post->post_name ?: $post_id ) . '.jpg', null, $data );
-		if ( ! empty( $upload['error'] ) ) {
-			return new WP_Error( 'afi_upload', $upload['error'] );
+		if ( ! $encoded || '' === $data ) {
+			return new WP_Error( 'afi_encode', 'Could not encode the generated image.' );
 		}
-		$att_id = wp_insert_attachment(
-			array(
-				'post_title'     => $texts['title'],
-				'post_mime_type' => 'image/jpeg',
-				'post_status'    => 'inherit',
-			),
-			$upload['file'],
-			$post_id
-		);
-		require_once ABSPATH . 'wp-admin/includes/image.php';
-		wp_update_attachment_metadata( $att_id, wp_generate_attachment_metadata( $att_id, $upload['file'] ) );
+
+		if ( $reuse ) {
+			$file   = get_attached_file( $old );
+			$result = self::overwrite_image_file( $file, $data );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+			$att_id = wp_update_post( array( 'ID' => $old, 'post_title' => $texts['title'] ), true );
+		} else {
+			$upload = wp_upload_bits( 'featured-' . ( $post->post_name ?: $post_id ) . '.jpg', null, $data );
+			if ( ! empty( $upload['error'] ) ) {
+				return new WP_Error( 'afi_upload', $upload['error'] );
+			}
+			$file   = $upload['file'];
+			$att_id = wp_insert_attachment(
+				array(
+					'post_title'     => $texts['title'],
+					'post_mime_type' => 'image/jpeg',
+					'post_status'    => 'inherit',
+				),
+				$file,
+				$post_id,
+				true
+			);
+		}
+		if ( is_wp_error( $att_id ) ) {
+			if ( ! $reuse ) {
+				wp_delete_file( $file );
+			}
+			return $att_id;
+		}
+		$result = self::refresh_image_metadata( $att_id, $file );
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
 		update_post_meta( $att_id, self::META_GENERATED, 1 );
+		update_post_meta( $att_id, self::META_BACKGROUND, $bg_id );
 		update_post_meta( $att_id, '_wp_attachment_image_alt', $texts['title'] );
 		set_post_thumbnail( $post_id, $att_id );
 		update_post_meta( $post_id, self::META_HASH, $hash );
 
-		if ( $old && $old !== $att_id && get_post_meta( $old, self::META_GENERATED, true ) ) {
-			wp_delete_attachment( $old, true );
-		}
 		return $att_id;
+	}
+
+	/** Stage the complete JPEG before replacing the existing file. */
+	private static function overwrite_image_file( $file, $data ) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+		if ( ! $file || ! is_dir( dirname( $file ) ) ) {
+			return new WP_Error( 'afi_replace', 'The generated image directory is unavailable.' );
+		}
+		$temp = wp_tempnam( wp_basename( $file ), dirname( $file ) );
+		if ( ! $temp ) {
+			return new WP_Error( 'afi_replace', 'Could not create a temporary image file.' );
+		}
+		if ( strlen( $data ) !== file_put_contents( $temp, $data ) ) {
+			wp_delete_file( $temp );
+			return new WP_Error( 'afi_replace', 'Could not write the regenerated image.' );
+		}
+		$mode = file_exists( $file ) ? fileperms( $file ) & 0777 : fileperms( dirname( $file ) ) & 0666;
+		chmod( $temp, $mode );
+		if ( ! @rename( $temp, $file ) ) {
+			wp_delete_file( $temp );
+			return new WP_Error( 'afi_replace', 'Could not replace the generated image. Check upload directory permissions.' );
+		}
+		clearstatcache( true, $file );
+		return true;
+	}
+
+	/** Refresh thumbnails in place and remove sizes no longer in use. */
+	private static function refresh_image_metadata( $att_id, $file ) {
+		require_once ABSPATH . 'wp-admin/includes/image.php';
+		$old_meta = wp_get_attachment_metadata( $att_id );
+		// Keep the full-size JPEG URL stable, even above WordPress's scaling limit
+		// or when another plugin requests automatic format conversion.
+		$keep_size = function ( $threshold, $size, $path, $id ) use ( $att_id ) {
+			return (int) $id === (int) $att_id ? false : $threshold;
+		};
+		$keep_format = function ( $formats, $path ) use ( $file ) {
+			return $path === $file ? array() : $formats;
+		};
+		add_filter( 'big_image_size_threshold', $keep_size, PHP_INT_MAX, 4 );
+		add_filter( 'image_editor_output_format', $keep_format, PHP_INT_MAX, 2 );
+		try {
+			$metadata = wp_generate_attachment_metadata( $att_id, $file );
+		} finally {
+			remove_filter( 'big_image_size_threshold', $keep_size, PHP_INT_MAX );
+			remove_filter( 'image_editor_output_format', $keep_format, PHP_INT_MAX );
+		}
+		if ( empty( $metadata['width'] ) || empty( $metadata['height'] ) ) {
+			return new WP_Error( 'afi_metadata', 'Could not generate image metadata.' );
+		}
+		wp_update_attachment_metadata( $att_id, $metadata );
+		$files = function ( $meta ) {
+			$names   = wp_list_pluck( $meta['sizes'] ?? array(), 'file' );
+			$names[] = wp_basename( $meta['file'] ?? '' );
+			$names[] = $meta['original_image'] ?? '';
+			return array_filter( $names );
+		};
+		foreach ( array_diff( $files( $old_meta ), $files( $metadata ) ) as $obsolete ) {
+			wp_delete_file_from_directory( dirname( $file ) . '/' . wp_basename( $obsolete ), dirname( $file ) );
+		}
+		return true;
+	}
+
+	/** Load local media or the attachment URL when a media service offloads it. */
+	private static function load_background( $bg_id ) {
+		$reason = 'The image file is missing or unreadable on this server.';
+		$files  = array_unique( array( get_attached_file( $bg_id ), get_attached_file( $bg_id, true ) ) );
+		foreach ( $files as $file ) {
+			if ( $file && is_readable( $file ) && is_file( $file ) ) {
+				$data = @file_get_contents( $file );
+				$src  = $data ? @imagecreatefromstring( $data ) : false;
+				if ( $src ) {
+					return $src;
+				}
+				$reason = 'The server could not decode this image. Try uploading a JPEG or PNG copy.';
+			}
+		}
+
+		// Use WordPress's safe HTTP client for CDN/offloaded attachments. Do not
+		// require PHP URL streams, which many hosts disable.
+		$url = wp_get_attachment_url( $bg_id );
+		if ( $url ) {
+			$response = wp_safe_remote_get( $url, array(
+				'timeout'             => 15,
+				'redirection'         => 3,
+				'limit_response_size' => 20 * MB_IN_BYTES,
+			) );
+			if ( is_wp_error( $response ) ) {
+				$reason .= ' The Media Library URL could not be fetched: ' . $response->get_error_message();
+			} elseif ( 200 !== wp_remote_retrieve_response_code( $response ) ) {
+				$reason .= sprintf( ' The Media Library URL returned HTTP %d.', wp_remote_retrieve_response_code( $response ) );
+			} else {
+				$data = wp_remote_retrieve_body( $response );
+				// Reject a response truncated at the limit rather than decoding a
+				// partial JPEG, which GD may otherwise accept with missing pixels.
+				$src = $data && strlen( $data ) < 20 * MB_IN_BYTES ? @imagecreatefromstring( $data ) : false;
+				if ( $src ) {
+					return $src;
+				}
+				$reason = 'The Media Library URL did not return an image this server can decode (20 MB download limit). Try uploading a JPEG or PNG copy.';
+			}
+		}
+		return new WP_Error( 'afi_background', sprintf( 'Could not load mapped background "%1$s" (media ID %2$d). %3$s Generation stopped without replacing the featured image.', get_the_title( $bg_id ), $bg_id, $reason ) );
 	}
 
 	public static function render( $o, $texts, $bg_id ) {
 		$stacked = 'stacked' === $o['layout'];
-		$file    = $bg_id ? get_attached_file( $bg_id ) : '';
-		$src     = ( $file && is_readable( $file ) ) ? @imagecreatefromstring( file_get_contents( $file ) ) : false;
+		$src     = $bg_id ? self::load_background( $bg_id ) : false;
+		if ( is_wp_error( $src ) ) {
+			return $src;
+		}
 
 		if ( $src ) {
 			// A tag background keeps its own size; Stacked adds the text panel below it.
@@ -310,20 +466,55 @@ class AFI_Generator {
 		return abs( $box[2] - $box[0] );
 	}
 
+	/**
+	 * Break at spaces or Han character boundaries without splitting English words
+	 * or Unicode grapheme clusters. Keep opening punctuation with the next item,
+	 * and closing punctuation with the preceding item.
+	 */
 	private static function wrap( $text, $font, $size, $max_w ) {
+		$text = trim( preg_replace( '/\s+/u', ' ', $text ) );
+		preg_match_all( '/\X/u', $text, $matches );
+		$opening  = '/^[\p{Ps}\p{Pi}]/u';
+		$closing  = '/^[\p{Pe}\p{Pf}、。，．！？：；％‰…,.!?:;%]/u';
+		$units    = array();
+		$unit     = '';
+		$previous = '';
+		$space    = false;
+		foreach ( $matches[0] as $character ) {
+			if ( ' ' === $character ) {
+				$unit .= ' ';
+				$space = true;
+				continue;
+			}
+			// Include CJK punctuation and fullwidth forms at mixed-language boundaries.
+			$can_break = $space || preg_match( '/[\p{Han}\x{3000}-\x{303f}\x{ff01}-\x{ff65}]/u', $previous . $character );
+			if ( '' !== $unit && $can_break
+				&& ! preg_match( $opening, $previous )
+				&& ! preg_match( $closing, $character ) ) {
+				$units[] = $unit;
+				$unit    = '';
+			}
+			$unit    .= $character;
+			$previous = $character;
+			$space    = false;
+		}
+		if ( '' !== $unit ) {
+			$units[] = $unit;
+		}
+
 		$lines = array();
 		$cur   = '';
-		foreach ( preg_split( '/\s+/u', $text ) as $word ) {
-			$try = '' === $cur ? $word : $cur . ' ' . $word;
-			if ( '' !== $cur && self::text_width( $try, $font, $size ) > $max_w ) {
-				$lines[] = $cur;
-				$cur     = $word;
+		foreach ( $units as $unit ) {
+			$try = $cur . $unit;
+			if ( '' !== $cur && self::text_width( rtrim( $try ), $font, $size ) > $max_w ) {
+				$lines[] = rtrim( $cur );
+				$cur     = $unit;
 			} else {
 				$cur = $try;
 			}
 		}
 		if ( '' !== $cur ) {
-			$lines[] = $cur;
+			$lines[] = rtrim( $cur );
 		}
 		return $lines;
 	}

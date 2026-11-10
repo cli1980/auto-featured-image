@@ -2,6 +2,7 @@ jQuery(function ($) {
 	var $form = $('#afi-tag-table').closest('form');
 	var $table = $('#afi-tag-table tbody');
 	var $img = $('#afi-preview');
+	var $error = $('#afi-preview-error');
 	var $spinner = $('#afi-preview-spinner');
 	var timer = null;
 	var pending = null;
@@ -23,7 +24,9 @@ jQuery(function ($) {
 		fetch(afiPreview.ajaxUrl, { method: 'POST', body: data, credentials: 'same-origin', signal: pending.signal })
 			.then(function (r) {
 				if (!r.ok) {
-					throw new Error('HTTP ' + r.status);
+					return r.json().catch(function () { return {}; }).then(function (result) {
+						throw new Error((result.data && result.data.message) || 'Preview failed (HTTP ' + r.status + ').');
+					});
 				}
 				return r.blob();
 			})
@@ -32,11 +35,16 @@ jQuery(function ($) {
 					URL.revokeObjectURL(objectUrl);
 				}
 				objectUrl = URL.createObjectURL(blob);
-				$img.attr('src', objectUrl);
+				$img.attr('src', objectUrl).show();
+				$error.hide().text('');
 			})
 			.catch(function (e) {
-				if (e.name !== 'AbortError' && window.console) {
-					console.error('AFI preview failed', e);
+				if (e.name !== 'AbortError') {
+					$img.hide();
+					$error.text(e.message).show();
+					if (window.console) {
+						console.error('AFI preview failed', e);
+					}
 				}
 			})
 			.finally(function () {

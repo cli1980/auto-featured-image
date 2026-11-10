@@ -87,6 +87,9 @@ class AFI_Settings {
 			'author'   => wp_get_current_user()->display_name,
 		);
 		$img = AFI_Generator::render( $o, $texts, $bg_id );
+		if ( is_wp_error( $img ) ) {
+			wp_send_json_error( array( 'message' => $img->get_error_message() ), 422 );
+		}
 		nocache_headers();
 		header( 'Content-Type: image/jpeg' );
 		imagejpeg( $img, null, 85 );
@@ -108,7 +111,7 @@ class AFI_Settings {
 		}
 		wp_enqueue_media();
 		wp_enqueue_style( 'wp-color-picker' );
-		wp_enqueue_script( 'afi-admin', AFI_URL . 'assets/admin.js', array( 'jquery', 'wp-color-picker' ), '0.2.0', true );
+		wp_enqueue_script( 'afi-admin', AFI_URL . 'assets/admin.js', array( 'jquery', 'wp-color-picker' ), '0.2.1', true );
 		wp_localize_script(
 			'afi-admin',
 			'afiPreview',
@@ -132,8 +135,17 @@ class AFI_Settings {
 			'tag_backgrounds' => array(),
 			'fields'          => array(),
 		);
-		$tags = $in['tag_backgrounds']['tag'] ?? array();
-		$imgs = $in['tag_backgrounds']['image'] ?? array();
+		// WordPress can sanitize twice on first save: accept both form rows and
+		// the normalized tag ID => attachment ID mapping returned by this method.
+		$backgrounds = $in['tag_backgrounds'] ?? array();
+		$backgrounds = is_array( $backgrounds ) ? $backgrounds : array();
+		if ( isset( $backgrounds['tag'] ) || isset( $backgrounds['image'] ) ) {
+			$tags = $backgrounds['tag'] ?? array();
+			$imgs = $backgrounds['image'] ?? array();
+		} else {
+			$tags = array_keys( $backgrounds );
+			$imgs = array_values( $backgrounds );
+		}
 		foreach ( (array) $tags as $i => $tag_id ) {
 			$tag_id = absint( $tag_id );
 			$img_id = absint( $imgs[ $i ] ?? 0 );
@@ -185,7 +197,7 @@ class AFI_Settings {
 				</table>
 
 				<h2>Tag backgrounds</h2>
-				<p class="description">If a post has several mapped tags, the first matching row wins.</p>
+				<p class="description">If a post has several mapped tags, the first matching row wins. Add a separate mapping for each tag you want to use.</p>
 				<table class="widefat striped" id="afi-tag-table" style="max-width:800px">
 					<thead><tr><th>Tag</th><th>Background image</th><th></th></tr></thead>
 					<tbody>
@@ -265,6 +277,7 @@ class AFI_Settings {
 					<span class="spinner" id="afi-preview-spinner" style="float:none"></span>
 				</p>
 				<p class="description">Placeholder text; updates as you edit and reflects unsaved changes. Click Save Changes to keep them.</p>
+				<p id="afi-preview-error" role="alert" class="notice notice-error" style="display:none;padding:10px"></p>
 				<div style="max-width:800px;border:1px solid #c3c4c7;background:#f6f7f7;line-height:0">
 					<img id="afi-preview" alt="Featured image preview" style="width:100%;height:auto">
 				</div>
